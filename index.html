@@ -188,9 +188,9 @@ let VIEW = { screen:'list', chat:null }, SKEW = 0, LOCKED = PREFS.appLock && !!P
 const PRES = {};                               // peer id -> card (online / last_seen)
 
 /* ---------- api ---------- */
-async function rpc(fn, args){
+async function rpc(fn, args, token){
   if(!SB.url) throw new Error(L('إعدادات قاعدة البيانات ناقصة'));
-  let r; try{ r = await fetch(SB.url + '/rest/v1/rpc/' + fn, { method:'POST', headers:{ apikey:SB.key, 'Content-Type':'application/json' }, body:JSON.stringify(args || {}) }); }
+  let r; try{ r = await fetch(SB.url + '/rest/v1/rpc/' + fn, { method:'POST', headers:Object.assign({ apikey:SB.key, 'Content-Type':'application/json' }, token ? { Authorization:'Bearer ' + token } : {}), body:JSON.stringify(args || {}) }); }
   catch(e){ ONLINE = false; throw new Error(L('ما فيه اتصال بالإنترنت')); }
   ONLINE = true;
   const t = await r.text(); let j = null; try{ j = t ? JSON.parse(t) : null; }catch(e){}
@@ -551,42 +551,90 @@ function settingsScreen(){
   sc.append(body); app.prepend(bar, sc);
 }
 
-function onboard(){
+/* ---------- onboarding: phone verified by SMS code (OTP) ---------- */
+const LL = (a, e) => LANG === 'en' ? e : a;
+async function authApi(path, body){
+  let r; try{ r = await fetch(SB.url + '/auth/v1/' + path, { method:'POST', headers:{ apikey:SB.key, 'Content-Type':'application/json' }, body:JSON.stringify(body) }); }
+  catch(e){ throw new Error(L('ما فيه اتصال بالإنترنت')); }
+  const j = await r.json().catch(() => ({}));
+  if(!r.ok){
+    const m = String(j.msg || j.error_description || j.message || '');
+    if(/expired|invalid/i.test(m)) throw new Error(LL('الرمز غلط أو انتهى، اطلب رمز جديد', 'Wrong or expired code, request a new one'));
+    if(/rate|seconds|too many/i.test(m)) throw new Error(LL('انتظر شوي قبل ما تطلب رمز ثاني', 'Please wait a moment before requesting another code'));
+    if(/provider|disabled|unsupported/i.test(m)) throw new Error(LL('خدمة الرسائل مو مفعّلة للحين، حاول بعدين', 'SMS service is not enabled yet, try later'));
+    throw new Error(m || L('صار خطأ، حاول مرة ثانية'));
+  }
+  return j;
+}
+const normP = v => { let d = String(v || '').replace(/[٠-٩]/g, c => '٠١٢٣٤٥٦٧٨٩'.indexOf(c)).replace(/\D/g, ''); if(d.startsWith('00')) d = d.slice(2); if(/^[79]\d{7}$/.test(d)) d = '968' + d; return d; };
+function onboard(mode){
+  mode = mode || 'new';
   const name = el('input', { class:'in', id:'oName', placeholder:L('مثال: سالم'), maxlength:40 });
   const u = el('input', { class:'in', id:'oUser', placeholder:'salem', dir:'ltr', autocapitalize:'off', autocomplete:'off', maxlength:20 });
-  const ph = el('input', { class:'in', id:'oPhone', placeholder:'9XXXXXXX', inputmode:'tel', dir:'ltr', maxlength:15 });
+  const ph = el('input', { class:'in', id:'oPhone', placeholder:'9XXXXXXX', inputmode:'tel', dir:'ltr', maxlength:16, autocomplete:'tel' });
   const em = el('input', { class:'in', id:'oMail', placeholder:'name@mail.com', type:'email', dir:'ltr', autocapitalize:'off', maxlength:100 });
+  const code = el('input', { class:'in', id:'oCode', placeholder:'••••••', inputmode:'numeric', dir:'ltr', maxlength:8, autocomplete:'one-time-code', style:'text-align:center;letter-spacing:.4em;font-size:1.3rem' });
   const agree = el('input', { type:'checkbox', id:'oAgree' });
-  const go = el('button', { class:'btn', type:'button', text:L('ابدأ') });
+  const send = el('button', { class:'btn', type:'button', text:LL('📩 أرسل رمز التأكيد', '📩 Send verification code') });
+  const go = el('button', { class:'btn', type:'button', text:mode === 'new' ? LL('✅ تأكيد وابدأ', '✅ Verify & start') : LL('✅ تأكيد ورجّع حسابي', '✅ Verify & restore') });
+  const resend = el('button', { class:'chip', type:'button', text:LL('إعادة إرسال الرمز', 'Resend code') });
+  const step2 = el('div', { class:'f', hidden:true }, el('label', { for:'oCode', text:LL('اكتب الرمز اللي وصلك برسالة SMS', 'Enter the code we sent by SMS') }), code, go, el('div', { class:'chips', style:'justify-content:center' }, resend));
+  let P = '', tick = null;
+  const cooldown = () => { let s = 60; resend.disabled = true; clearInterval(tick); tick = setInterval(() => { s--; resend.textContent = LL('إعادة إرسال الرمز', 'Resend code') + ' (' + s + ')'; if(s <= 0){ clearInterval(tick); resend.disabled = false; resend.textContent = LL('إعادة إرسال الرمز', 'Resend code'); } }, 1000); };
+  const sendCode = async () => {
+    P = normP(ph.value);
+    if(!/^968[79]\d{7}$/.test(P) && !/^[1-9]\d{9,14}$/.test(P)) return toast(LL('اكتب رقم هاتفك صح (مثل 9XXXXXXX)', 'Enter a valid phone number'));
+    if(mode === 'new'){
+      const U = u.value.trim().replace(/^@/, '').toLowerCase(), E = em.value.trim().toLowerCase();
+      if(U && !/^[a-z0-9_.]{3,20}$/.test(U)) return toast(L('اسم المستخدم: 3 إلى 20 حرف إنجليزي أو رقم'));
+      if(E && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(E)) return toast(L('الإيميل مو صحيح'));
+      if(!agree.checked) return toast(L('لازم توافق على الشروط'));
+    }
+    send.disabled = true;
+    try{ await authApi('otp', { phone:'+' + P }); step2.hidden = false; ph.disabled = true; send.hidden = true; cooldown(); code.focus(); toast(LL('وصلك رمز برسالة 📩', 'Code sent 📩')); }
+    catch(e){ toast(e.message); }
+    send.disabled = false;
+  };
+  send.onclick = sendCode; resend.onclick = sendCode;
   go.onclick = async () => {
-    const U = u.value.trim().replace(/^@/, '').toLowerCase(), P = ph.value.replace(/\D/g, ''), E = em.value.trim().toLowerCase();
-    if(!U && !P && !E) return toast(L('اكتب واحد على الأقل: اسم المستخدم أو الهاتف أو الإيميل'));
-    if(U && !/^[a-z0-9_.]{3,20}$/.test(U)) return toast(L('اسم المستخدم: 3 إلى 20 حرف إنجليزي أو رقم'));
-    if(P && !/^(968)?[79]\d{7}$/.test(P)) return toast(L('رقم الهاتف 8 أرقام ويبدأ بـ 9 أو 7'));
-    if(E && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(E)) return toast(L('الإيميل مو صحيح'));
-    if(!agree.checked) return toast(L('لازم توافق على الشروط'));
-    go.disabled = true; go.textContent = L('أجهّز مفاتيح التشفير…');
+    const c = code.value.replace(/\D/g, '');
+    if(c.length < 4) return toast(LL('اكتب الرمز كامل', 'Enter the full code'));
+    go.disabled = true; go.textContent = LL('أتأكد…', 'Verifying…');
     try{
+      const s = await authApi('verify', { type:'sms', phone:'+' + P, token:c });
+      go.textContent = L('أجهّز مفاتيح التشفير…');
       KEYS = await newKeys();
-      const r = await rpc('hb_register', { p_username:U || null, p_phone:P || null, p_email:E || null, p_name:name.value.trim() || null, p_pubkey:KEYS.pub });
+      const r = mode === 'new'
+        ? await rpc('hb_register', { p_username:u.value.trim().replace(/^@/, '').toLowerCase() || null, p_phone:P, p_email:em.value.trim().toLowerCase() || null, p_name:name.value.trim() || null, p_pubkey:KEYS.pub }, s.access_token)
+        : await rpc('hb_recover', { p_pubkey:KEYS.pub }, s.access_token);
       ACCT = { id:r.id, secret:r.secret }; LS.set('hb-keys', KEYS); LS.set('hb-acct', ACCT);
       ME = await rpc('hb_me', auth()); LS.set('hb-me', ME);
-      VIEW = { screen:'list' }; render(); toast(L('هلا فيك في لوبو ✍️')); sync();
-    }catch(e){ toast(e.message); go.disabled = false; go.textContent = L('ابدأ'); KEYS = null; }
+      VIEW = { screen:'list' }; render(); toast(mode === 'new' ? L('هلا فيك في لوبو ✍️') : LL('رجع حسابك ✅', 'Account restored ✅')); sync();
+    }catch(e){ toast(e.message); go.disabled = false; go.textContent = mode === 'new' ? LL('✅ تأكيد وابدأ', '✅ Verify & start') : LL('✅ تأكيد ورجّع حسابي', '✅ Verify & restore'); KEYS = null; }
   };
+  const logo = el('div', { class:'big', html:LOGO + L('لوبو') });
+  let taps = 0, tt; logo.onclick = () => { taps++; clearTimeout(tt); tt = setTimeout(() => taps = 0, 900); if(taps >= 3){ taps = 0; openAdmin(); } };
   const body = el('div', { class:'ob' },
     el('div', { class:'chips', style:'justify-content:center' }, el('button', { class:'chip', type:'button', 'aria-pressed':String(LANG === 'ar'), text:'عربي', onclick:() => setLang('ar') }), el('button', { class:'chip', type:'button', 'aria-pressed':String(LANG === 'en'), text:'English', onclick:() => setLang('en') })),
-    el('div', { class:'big', html:LOGO + L('لوبو') }),
+    logo,
     el('p', { text:L('رسائل وصور وفيديو وملفات مشفّرة، تختفي بعد ما تنقرأ.') }),
-    el('div', { class:'f' }, el('label', { for:'oName', text:L('اسمك (يشوفه أصدقاؤك، اختياري)') }), name),
-    el('div', { class:'f' }, el('label', { for:'oUser', text:L('اسم المستخدم (عشان يلقونك فيه)') }), u),
-    el('div', { class:'f' }, el('label', { for:'oPhone', text:L('رقم الهاتف (اختياري)') }), ph),
-    el('div', { class:'f' }, el('label', { for:'oMail', text:L('الإيميل (اختياري)') }), em),
-    el('p', { class:'hint', text:L('كلها اختيارية، بس لازم واحد على الأقل. البحث الحين يكون باسم المستخدم، والهاتف والإيميل يشتغلون في البحث بعد التأكيد في التحديث الجاي.') }),
-    el('label', { class:'tg', for:'oAgree' }, el('span', {}, L('عمري 17 سنة أو أكثر، وأوافق على الشروط'), el('small', {}, L('ممنوع الإساءة والتهديد والمحتوى المخالف. '), el('a', { href:'privacy.html', target:'_blank', rel:'noopener', style:'color:var(--nib)', text:L('اقرأ الشروط') }))), agree),
-    go);
+    ...(mode === 'new' ? [
+      el('div', { class:'f' }, el('label', { for:'oName', text:L('اسمك (يشوفه أصدقاؤك، اختياري)') }), name),
+      el('div', { class:'f' }, el('label', { for:'oUser', text:L('اسم المستخدم (عشان يلقونك فيه)') }), u),
+      el('div', { class:'f' }, el('label', { for:'oPhone', text:LL('رقم الهاتف (نرسل له رمز تأكيد)', 'Phone number (we text you a code)') }), ph),
+      el('div', { class:'f' }, el('label', { for:'oMail', text:L('الإيميل (اختياري)') }), em),
+      el('p', { class:'hint', text:LL('نتأكد من رقمك برسالة SMS عشان نحميك من الحسابات الوهمية. رقمك ما يظهر لأحد إلا اللي يعرفه ويدوّر عليه.', 'We verify your number by SMS to protect you from fake accounts. Your number is only findable by people who already know it.') }),
+      el('label', { class:'tg', for:'oAgree' }, el('span', {}, L('عمري 17 سنة أو أكثر، وأوافق على الشروط'), el('small', {}, L('ممنوع الإساءة والتهديد والمحتوى المخالف. '), el('a', { href:'privacy.html', target:'_blank', rel:'noopener', style:'color:var(--nib)', text:L('اقرأ الشروط') }))), agree)
+    ] : [
+      el('h3', { style:'margin:0;text-align:center', text:LL('🔑 رجّع حسابك', '🔑 Restore your account') }),
+      el('div', { class:'f' }, el('label', { for:'oPhone', text:LL('رقم الهاتف المسجّل في لوبو', 'Your Loopo phone number') }), ph),
+      el('p', { class:'hint', text:LL('للجوال الجديد أو لو حذفت التطبيق. رسائلك القديمة ما تنفتح، لأنها كانت مشفّرة بمفتاح جوالك القديم.', 'For a new phone or after reinstalling. Old messages can\'t be opened because they were encrypted with your old phone\'s key.') })
+    ]),
+    send, step2,
+    el('button', { class:'chip', type:'button', style:'justify-self:center', text:mode === 'new' ? LL('عندي حساب (جوال جديد)', 'I already have an account') : LL('حساب جديد', 'Create a new account'), onclick:() => { clearInterval(tick); app.querySelector('.scroll')?.remove(); onboard(mode === 'new' ? 'back' : 'new'); } }));
   app.prepend(el('div', { class:'scroll' }, body));
 }
+function openAdmin(){ const url = 'https://shmmuh8-design.github.io/Loopo/admin.html'; if(NATIVE && window.Capacitor?.Plugins?.Browser) Capacitor.Plugins.Browser.open({ url }); else window.open(url, '_blank'); }
 
 /* ---------- sync loop ---------- */
 let syncing = false, firstSync = true, lastIds = new Set();
