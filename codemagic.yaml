@@ -36,6 +36,7 @@ workflows:
           /usr/libexec/PlistBuddy -c "Set :CFBundleDevelopmentRegion ar" $PLIST || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations array" $PLIST || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:0 string ar" $PLIST || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:1 string en" $PLIST || true
           /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes array" $PLIST || true
           /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes:0 string whatsapp" $PLIST || true
           /usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" $PLIST || true
